@@ -1,0 +1,547 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: A Continuous-Deployment, Serverless Rock-Paper-Scissors-Over-SMS Reference Implementation
+Parameters:
+  AppId:
+    AllowedPattern: '^([a-z0-9-])+$'
+    ConstraintDescription: Application IDs must be between 2 and 20 characters, begin with a letter, and only contain lowercase letters, numbers, and hyphens (-).
+    Description: Application ID.
+    MaxLength: 20
+    MinLength: 2
+    Type: String
+  ConnectionArn:
+    AllowedPattern: '^arn:aws(-[\w]+)*:codestar-connections:.+:[0-9]{12}:connection\/.+$'
+    Description: CodeStar GitHub Connection ARN (Find under CodePipeline Console -> Settings -> Connections)
+    Type: String
+  GitHubRepositoryOwner:
+    Description: GitHub repository owner name
+    Type: String
+  RepositoryName:
+    Description: GitHub repository name
+    MaxLength: 100
+    MinLength: 1
+    Type: String
+  BranchName:
+    Description: GitHub branch name
+    MaxLength: 100
+    MinLength: 1
+    Type: String
+Resources:
+  CloudFormationRole:
+    Description: Service role in IAM for AWS CloudFormation
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - cloudformation.amazonaws.com
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:s3:::${S3Bucket}
+            - Fn::Sub: arn:${AWS::Partition}:s3:::${S3Bucket}/*
+          - Action:
+            - lambda:CreateAlias
+            - lambda:CreateFunction
+            - lambda:DeleteAlias
+            - lambda:DeleteFunction
+            - lambda:DeleteFunctionConcurrency
+            - lambda:DeleteLayerVersion
+            - lambda:DeleteProvisionedConcurrencyConfig
+            - lambda:GetEventSourceMapping
+            - lambda:GetFunction
+            - lambda:GetFunctionConfiguration
+            - lambda:GetLayerVersion
+            - lambda:ListTags
+            - lambda:ListVersionsByFunction
+            - lambda:PublishLayerVersion
+            - lambda:PublishVersion
+            - lambda:PutFunctionConcurrency
+            - lambda:PutProvisionedConcurrencyConfig
+            - lambda:TagResource
+            - lambda:UntagResource
+            - lambda:UpdateAlias
+            - lambda:UpdateFunctionCode
+            - lambda:UpdateFunctionConfiguration
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - lambda:AddPermission
+            - lambda:DeleteFunctionEventInvokeConfig
+            - lambda:InvokeFunction
+            - lambda:PutFunctionEventInvokeConfig
+            - lambda:RemovePermission
+            - lambda:UpdateFunctionEventInvokeConfig
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppId}-*
+          - Action:
+            - lambda:CreateEventSourceMapping
+            - lambda:UpdateEventSourceMapping
+            Effect: Allow
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                lambda:FunctionArn:
+                  Fn::Sub: arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppId}-*
+          - Action:
+            - lambda:DeleteEventSourceMapping
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - lambda:AddLayerVersionPermission
+            - lambda:RemoveLayerVersionPermission
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:layer:${AppId}-*
+          - Action:
+            - dynamodb:CreateTable
+            - dynamodb:DeleteTable
+            - dynamodb:DescribeContinuousBackups
+            - dynamodb:DescribeStream
+            - dynamodb:DescribeTable
+            - dynamodb:DescribeTimeToLive
+            - dynamodb:ListTagsOfResource
+            - dynamodb:TagResource
+            - dynamodb:UntagResource
+            - dynamodb:UpdateContinuousBackups
+            - dynamodb:UpdateTable
+            - dynamodb:UpdateTimeToLive
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - sns:CreateTopic
+            - sns:DeleteTopic
+            - sns:GetTopicAttributes
+            - sns:ListSubscriptionsByTopic
+            - sns:SetSubscriptionAttributes
+            - sns:Subscribe
+            - sns:Unsubscribe
+            - sns:TagResource
+            - sns:UntagResource
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - sqs:CreateQueue
+            - sqs:DeleteQueue
+            - sqs:GetQueueAttributes
+            - sqs:GetQueueUrl
+            - sqs:ListQueueTags
+            - sqs:TagQueue
+            - sqs:UntagQueue
+            - sqs:SetQueueAttributes
+            - sqs:AddPermission
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - iam:PassRole
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppId}-*
+          - Action:
+            - cloudformation:CreateChangeSet
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+          - Action:
+            - iam:CreateServiceLinkedRole
+            - iam:DeleteRole
+            - iam:GetRole
+            - iam:GetRolePolicy
+            - iam:PutRolePolicy
+            Effect: Allow
+            Resource: '*'
+          - Action: # This statement constrains created roles, and policies attached to those roles, to the specified PermissionsBoundary.
+            - iam:AttachRolePolicy
+            - iam:CreateRole
+            - iam:DeleteRolePolicy
+            - iam:DetachRolePolicy
+            - iam:PutRolePermissionsBoundary
+            Condition: # Under this condition, a role assigned, for example, the AdministratorAccess policy MUST also be bound by the PermissionsBoundary.
+              StringEquals: # Thus, the AdministratorAccess role would confer, at most, the permissions of the PermissionsBoundary.
+                iam:PermissionsBoundary:
+                  Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${AppId}-${AWS::Region}-PermissionsBoundary
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - logs:*
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - mobiletargeting:CreateApp
+            - mobiletargeting:DeleteApp
+            - mobiletargeting:GetApp
+            - mobiletargeting:GetApps
+            - mobiletargeting:GetApplicationSettings
+            - mobiletargeting:UpdateApplicationSettings
+            - mobiletargeting:GetChannels
+            - mobiletargeting:UpdateSmsChannel
+            - mobiletargeting:GetSmsChannel
+            - mobiletargeting:DeleteSmsChannel
+            - mobiletargeting:UpdateEmailChannel
+            - mobiletargeting:GetEmailChannel
+            - mobiletargeting:DeleteEmailChannel
+            - mobiletargeting:TagResource
+            - mobiletargeting:UntagResource
+            Effect: Allow
+            Resource: '*'
+        PolicyName: WorkerCloudFormationRolePolicy
+      RoleName:
+        Fn::Sub: ${AppId}-${AWS::Region}-CloudFormationRole
+    Type: AWS::IAM::Role
+  CodeBuildProject:
+    DependsOn:
+    - ToolChainRole
+    Properties:
+      Artifacts:
+        Packaging: zip
+        Type: codepipeline
+      Description:
+        Fn::Join:
+        - ''
+        - - 'AWS CloudFormation created CodeBuild App for '
+          - Ref: AppId
+      Environment:
+        ComputeType: small
+        EnvironmentVariables:
+        - Name: S3_BUCKET
+          Value:
+            Ref: S3Bucket
+        - Name: APP_ID
+          Value:
+            Ref: AppId
+        - Name: ACCOUNT_ID
+          Value:
+            Ref: AWS::AccountId
+        - Name: PARTITION
+          Value:
+            Ref: AWS::Partition
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Name:
+        Ref: AppId
+      ServiceRole:
+        Ref: ToolChainRole
+      Source:
+        Type: codepipeline
+    Type: AWS::CodeBuild::Project
+  PermissionsBoundaryPolicy:
+    Description: Creating an IAM managed policy for defining the permissions boundary for an AWS Lambda App
+    Properties:
+      Description: IAM policy to define the permissions boundary for IAM entities created in an AWS Lambda App
+      ManagedPolicyName:
+        Fn::Sub: ${AppId}-${AWS::Region}-PermissionsBoundary
+      PolicyDocument:
+        Statement:
+        - Action:
+          - '*'
+          Effect: Allow
+          Resource:
+          - Fn::Join: # Allow '*' on lambdas (in this region and account) starting with this AppId
+            - ':'
+            - - 'arn:aws:lambda'
+              - Ref: AWS::Region
+              - Ref: AWS::AccountId
+              - 'function'
+              - Fn::Join:
+                - ''
+                - - Ref: AppId
+                  - '*'
+          - Fn::Join: # Allow '*' SQS queues (in this region and account) starting with this AppId
+            - ':'
+            - - 'arn:aws:sqs'
+              - Ref: AWS::Region
+              - Ref: AWS::AccountId
+              - Fn::Join:
+                - ''
+                - - Ref: AppId
+                  - '*'
+          - Fn::Join: # Allow '*' DynamoDB tables (in this region and account) starting with this AppId
+            - ':'
+            - - 'arn:aws:dynamodb'
+              - Ref: AWS::Region
+              - Ref: AWS::AccountId
+              - Fn::Join:
+                - ''
+                - - 'table/'
+                  - Ref: AppId
+                  - '*'
+          Sid: StackResources
+        - Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:DescribeLogGroups
+          - logs:PutLogEvents
+          - xray:Put*
+          Effect: Allow
+          Resource: '*'
+          Sid: StaticPermissions
+        - Action:
+          - mobiletargeting:SendMessages
+          Effect: Allow
+          Resource: '*'
+          Sid: ActionsWithoutResourceLevelControls
+        Version: '2012-10-17'
+    Type: AWS::IAM::ManagedPolicy
+  ProjectPipeline:
+    DependsOn:
+    - ToolChainRole
+    - S3Bucket
+    - CodeBuildProject
+    - CloudFormationRole
+    Description: Creating a deployment pipeline for your project in AWS CodePipeline
+    Properties:
+      ArtifactStore:
+        Location:
+          Ref: S3Bucket
+        Type: S3
+      Name:
+        Fn::Join:
+        - '-'
+        - - Ref: AppId
+          - Pipeline
+      RoleArn:
+        Fn::GetAtt:
+        - ToolChainRole
+        - Arn
+      Stages:
+      - Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeStarSourceConnection
+            Version: 1
+          Configuration:
+            BranchName:
+              Ref: BranchName
+            ConnectionArn:
+              Ref: ConnectionArn
+            FullRepositoryId:
+              Fn::Join:
+              - /
+              - - Ref: GitHubRepositoryOwner
+                - Ref: RepositoryName
+            OutputArtifactFormat: CODE_ZIP
+          InputArtifacts: []
+          Name: ApplicationSource
+          OutputArtifacts:
+          - Name:
+              Fn::Join:
+              - '-'
+              - - Ref: AppId
+                - SourceArtifact
+          RunOrder: 1
+        Name: Source
+      - Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName:
+              Ref: AppId
+          InputArtifacts:
+          - Name:
+              Fn::Join:
+              - '-'
+              - - Ref: AppId
+                - SourceArtifact
+          Name: PackageExport
+          OutputArtifacts:
+          - Name:
+              Fn::Join:
+              - '-'
+              - - Ref: AppId
+                - BuildArtifact
+          RunOrder: 1
+        Name: Build
+      - Actions:
+        - ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: 1
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            Capabilities: CAPABILITY_NAMED_IAM
+            ChangeSetName: pipeline-changeset
+            ParameterOverrides:
+              Fn::Sub: '{"AppId":"${AppId}"}'
+            RoleArn:
+              Fn::GetAtt:
+              - CloudFormationRole
+              - Arn
+            StackName:
+              Ref: AppId
+            TemplatePath:
+              Fn::Sub: ${AppId}-BuildArtifact::template-export.yml
+          InputArtifacts:
+          - Name:
+              Fn::Join:
+              - '-'
+              - - Ref: AppId
+                - BuildArtifact
+          Name: GenerateChangeSet
+          OutputArtifacts: []
+          RunOrder: 1
+        - ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: 1
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: pipeline-changeset
+            StackName:
+              Ref: AppId
+          InputArtifacts: []
+          Name: ExecuteChangeSet
+          OutputArtifacts: []
+          RunOrder: 2
+        Name: Deploy
+    Type: AWS::CodePipeline::Pipeline
+  S3ArtifactBucketPolicy:
+    Description: Setting Amazon S3 bucket policy for AWS CodePipeline access
+    Properties:
+      Bucket:
+        Ref: S3Bucket
+      PolicyDocument:
+        Id: SSEAndSSLPolicy
+        Statement:
+        - Action:
+          - s3:GetObject
+          - s3:GetObjectVersion
+          - s3:GetBucketVersioning
+          Condition:
+            Bool:
+              aws:SecureTransport: false
+          Effect: Allow
+          Principal:
+            AWS:
+            - Fn::GetAtt:
+              - ToolChainRole
+              - Arn
+            - Fn::GetAtt:
+              - CloudFormationRole
+              - Arn
+          Resource:
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:s3:::'
+              - Ref: S3Bucket
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:s3:::'
+              - Ref: S3Bucket
+              - /*
+          Sid: WhitelistedGet
+        - Action:
+          - s3:PutObject
+          Effect: Allow
+          Principal:
+            AWS:
+            - Fn::GetAtt:
+              - ToolChainRole
+              - Arn
+          Resource:
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:s3:::'
+              - Ref: S3Bucket
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:s3:::'
+              - Ref: S3Bucket
+              - /*
+          Sid: WhitelistedPut
+        Version: '2012-10-17'
+    Type: AWS::S3::BucketPolicy
+  S3Bucket:
+    DeletionPolicy: Delete
+    Description: Creating Amazon S3 bucket for AWS CodePipeline artifacts
+    Properties:
+      BucketName:
+        Fn::Join:
+        - '-'
+        - - aws
+          - Ref: AWS::Region
+          - Ref: AWS::AccountId
+          - Ref: AppId
+          - pipe
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - '-'
+          - - Ref: AppId
+            - S3Bucket
+      VersioningConfiguration:
+        Status: Enabled
+    Type: AWS::S3::Bucket
+  ToolChainRole:
+    Description: Creating toolchain role in IAM for CodePipeline
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+            - codedeploy.amazonaws.com
+            - codepipeline.amazonaws.com
+            - elasticbeanstalk.amazonaws.com
+            - events.amazonaws.com
+            - lambda.amazonaws.com
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - '*'
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppId}/*
+            - Fn::Sub: arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AppId}
+            - Fn::Sub: arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+            - Fn::Sub: arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${AppId}-Pipeline
+            - Fn::Sub: arn:${AWS::Partition}:s3:::${S3Bucket}
+            - Fn::Sub: arn:${AWS::Partition}:s3:::${S3Bucket}/*
+          - Action:
+            - iam:PassRole
+            Effect: Allow
+            Resource:
+            - Fn::GetAtt:
+              - CloudFormationRole
+              - Arn
+          - Action:
+            - cloudtrail:CreateTrail
+            - cloudtrail:StartLogging
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:DescribeLogGroups
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - kms:GenerateDataKey*
+            - kms:Encrypt
+            - kms:Decrypt
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codestar-connections:UseConnection
+            Effect: Allow
+            Resource: '*'
+        PolicyName: ToolChainWorkerPolicy
+      RoleName:
+        Fn::Sub: ${AppId}-${AWS::Region}-ToolChain
+    Type: AWS::IAM::Role

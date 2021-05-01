@@ -1,0 +1,14 @@
+version: 0.2
+phases:
+  build:
+    commands:
+      - echo "[+] Installing dependencies...."
+      - pip install -r serverless_rps/requirements.txt -t serverless_rps/build/
+      - cp serverless_rps/*.py serverless_rps/build/
+      - echo "Starting SAM packaging `date` in `pwd`"
+      # Use AWS SAM to package the application by using AWS CloudFormation
+      - aws cloudformation package --template template.yml --s3-bucket $S3_BUCKET --output-template-file template-export.yml
+
+artifacts:
+  files:
+    - template-export.yml

@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Description: "ServerlessRPS Application Stack"
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+    # PermissionsBoundary MUST be defined, when deploying via the "Toolchain Stack." Otherwise, CloudFormation will attempt
+    # to create/manage roles without applying the permissions boundary, and will consequently fail, because the CloudFormationRole
+    # IAM Role used by the Toolchain Stack is conditioned on the Permissions Boundary.
+    #
+    # IF deploying via SAM CLI (and the Toolchain, which would create the boundary policy, has _not_ been deployed),
+    # you may omit/comment-out the below PermissionsBoundary line, or manually create an appropriate permissions boundary policy.
+    PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${AppId}-${AWS::Region}-PermissionsBoundary'
+    # This tagging scheme depends on 'Transform: AWS::Serverless-2016-10-31'
+    Tags:
+      ServerlessRPSAppId: !Ref AppId # Identifies the instance/deployment of ServerlessRPS
+      ServerlessRPSResourceType: "AppResource" # Resources of type "AppResource" are part of the "Application Stack"
+
+Parameters:
+  AppId:
+    Type: String
+
+Resources:
+  ServerlessRPSFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless_rps/
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      Timeout: 8 # IMPORTANT! When performing many (especially DB/network) operations, the default 3s may not be sufficient!
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SQSIncomingMessageQueue.Arn
+            Enabled: true
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt SQSIncomingMessageQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ServerlessRPSGameStateTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ServerlessRPSIdempotencyTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ServerlessRPSNicknameTable
+        - Statement:
+          - Sid: PinpointSendMessage
+            Effect: Allow
+            Action:
+              - mobiletargeting:SendMessages
+            Resource: '*' # This is made sufficiently limited by virtue of the App's PermissionsBoundary
+      Environment:
+        Variables:
+          PINPOINT_APPID: !Ref PinpointProject # Provide the Pinpoint App's ID, for use when sending messages.
+          DYNAMODB_GAMESTATETABLE: !Ref ServerlessRPSGameStateTable # Provide the name of the "GameState" DynamoDB Table
+          DYNAMODB_IDEMPOTENCYTABLE: !Ref ServerlessRPSIdempotencyTable # Provide the name of the "Idempotency" DynamoDB Table
+          DYNAMODB_NICKNAMETABLE: !Ref ServerlessRPSNicknameTable # Provide the name of the "GameState" DynamoDB Table
+          SQS_INCOMINGMESSAGEQUEUE: !Ref SQSIncomingMessageQueue # Provide the URL of the Incoming Messages SQS queue
+
+  # DynamoDB Table for storing RPS game state
+  ServerlessRPSGameStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: phone_number
+          AttributeType: S
+      KeySchema:
+        - AttributeName: phone_number
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  # DynamoDB Table for storing RPS game state
+  ServerlessRPSNicknameTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: nickname
+          AttributeType: S
+      KeySchema:
+        - AttributeName: nickname
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  # DynamoDB Table for tracking message UUIDs (using DynamoDB's record TTL feature) for idempotency purposes
+  ServerlessRPSIdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: messageId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: messageId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: TTLEpochTimestamp # NOTE: DynamoDB expects an _Epoch_ timestamp, to avoid timezone issues
+        Enabled: True
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  # This creates a parameter-named Pinpoint App (aka Project)
+  PinpointProject:
+    Type: AWS::Pinpoint::App
+    Properties:
+      Name: !Ref AppId
+      Tags:
+        ServerlessRPSAppId: !Ref AppId
+        ServerlessRPSResourceType: "AppResource"
+
+  # This enabled the SMS channel on the "PinpointProject" Pinpoint App
+  PinpointProjectSMSEnablement:
+    Type: AWS::Pinpoint::SMSChannel
+    Properties:
+      ApplicationId: !Ref PinpointProject
+      Enabled: True
+
+  # Create an SNS topic to receive incoming SMS
+  # NOTE: AWS does not allow automated configuration of two-way SMS
+  #   Thus, this must be manually assigned to the phone number in Pinpoint
+  SNSTopicIncomingMessages:
+    Type: AWS::SNS::Topic
+
+  # Create an SQS queue which will subscribe to the SNS topic for incoming messages
+  SQSIncomingMessageQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SQSDeadLetterQueue.Arn
+        maxReceiveCount: 8
+
+  # Create an SQS queue which will receive "dead" (message-receives exceeded) messages
+  SQSDeadLetterQueue:
+    Type: AWS::SQS::Queue
+
+  # Allow the "SNSTopicIncomingMessages" topic to send to the "SQSIncomingMessageQueue" queue
+  SQSIncomingMessageQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [ !Ref SQSIncomingMessageQueue ]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: Allow-SNSTopicIncomingMessages-SendMessage
+          Effect: Allow
+          Principal: "*" # NOTE: Access control is achieved via an "ArnEquals" condition
+          Action: "sqs:SendMessage"
+          Resource: !GetAtt SQSIncomingMessageQueue.Arn
+          Condition:
+            ArnEquals:
+              aws:SourceArn: !Ref SNSTopicIncomingMessages
+
+  # Subscribe the "SQSIncomingMessageQueue" Queue to the "SNSTopicIncomingMessages" topic
+  SNSSubscriptionIncomingMessages:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt SQSIncomingMessageQueue.Arn
+      # SNS topics have ARN as a ref value, precluding the GetAtt function's use
+      TopicArn: !Ref SNSTopicIncomingMessages
+
+Outputs:
+  SNSTopicIncomingMessages:
+    Description: "ARN of SNS Topic for incoming SMS messages. Must be set as the 'incoming messages destination' in the Pinpoint 'two-way messaging' settings."
+    Value: !Ref SNSTopicIncomingMessages
